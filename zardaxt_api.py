@@ -3,6 +3,7 @@ import _thread
 import json
 import socket
 import traceback
+import requests  # Добавляем для POST запросов к PHP webhook
 from zardaxt_logging import log
 from dune_client import incr
 from urllib.parse import urlparse, parse_qs
@@ -49,6 +50,13 @@ class ZardaxtApiServer(BaseHTTPRequestHandler):
         self.wfile.write(
             bytes(json.dumps(payload, indent=2, sort_keys=True), "utf-8"))
 
+    def send_html(self, html_content):
+        """Отправляет HTML контент клиенту"""
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(bytes(html_content, "utf-8"))
+
     def deny(self):
         self.send_response(403)
         self.end_headers()
@@ -60,6 +68,49 @@ class ZardaxtApiServer(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(bytes(payload, "utf-8"))
+
+    def post_to_php_webhook(self, data):
+        """Отправляет данные классификации в PHP webhook и получает HTML ответ"""
+        php_webhook_url = self.config.get('php_webhook_url')
+        
+        if not php_webhook_url:
+            log('PHP webhook URL not configured', 'api', level='WARNING')
+            return None
+            
+        try:
+            # Подготавливаем данные для отправки
+            payload = {
+                'fingerprint_data': data,
+                'timestamp': self.timestamps.get(data['details']['lookup_ip'], [])[-1] if self.timestamps.get(data['details']['lookup_ip']) else None,
+                'user_agent': self.get_user_agent(),
+                'headers': dict(self.headers) if hasattr(self, 'headers') else {}
+            }
+            
+            log(f'Sending data to PHP webhook: {php_webhook_url}', 'api', level='INFO')
+            
+            response = requests.post(
+                php_webhook_url, 
+                json=payload, 
+                timeout=self.config.get('php_webhook_timeout', 10),
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            if response.status_code == 200:
+                log(f'Successfully received response from PHP webhook', 'api', level='INFO')
+                return response.text
+            else:
+                log(f'PHP webhook returned status code: {response.status_code}', 'api', level='WARNING')
+                return None
+                
+        except requests.exceptions.Timeout:
+            log('PHP webhook request timed out', 'api', level='ERROR')
+            return None
+        except requests.exceptions.ConnectionError:
+            log('Failed to connect to PHP webhook', 'api', level='ERROR')
+            return None
+        except Exception as e:
+            log(f'Error posting to PHP webhook: {e}', 'api', level='ERROR')
+            return None
 
     # infer the base operating system from the user-agent
     # and then infer the operating system from the TCP/IP
@@ -94,8 +145,11 @@ class ZardaxtApiServer(BaseHTTPRequestHandler):
 
     def handle_lookup(self, client_ip, lookup_ip):
         detailed = self.get_query_arg('detail') is not None
+        php_mode = self.get_query_arg('php_mode') is not None  # Новый параметр для PHP режима
+        
         fp_copy = self.fingerprints.copy()
         fp_list = fp_copy.get(lookup_ip, None)
+        
         if fp_list and len(fp_list) > 0:
             # return the newest fingerprint
             fp_res = fp_list[-1]
@@ -103,8 +157,20 @@ class ZardaxtApiServer(BaseHTTPRequestHandler):
             classification['details']['num_fingerprints'] = len(fp_list)
             classification['details']['lookup_ip'] = lookup_ip
             classification['details']['client_ip'] = client_ip
-            classification['details']['os_mismatch'] = self.detect_os_mismatch(
-                classification)
+            classification['details']['os_mismatch'] = self.detect_os_mismatch(classification)
+            
+            # Если включен PHP режим, отправляем данные в webhook
+            if php_mode or self.config.get('always_use_php_webhook', False):
+                html_response = self.post_to_php_webhook(classification)
+                if html_response:
+                    return self.send_html(html_response)
+                else:
+                    # Fallback: если webhook недоступен, возвращаем дефолтную страницу или JSON
+                    fallback_html = self.config.get('fallback_html')
+                    if fallback_html:
+                        return self.send_html(fallback_html)
+            
+            # Стандартный JSON ответ (оригинальная логика)
             if detailed:
                 return self.send_json(classification)
             else:
@@ -115,6 +181,20 @@ class ZardaxtApiServer(BaseHTTPRequestHandler):
                     "avg_score_os_class": classification["avg_score_os_class"]
                 })
         else:
+            # Если нет отпечатков, но включен PHP режим
+            if php_mode or self.config.get('always_use_php_webhook', False):
+                no_fp_data = {
+                    'details': {
+                        'lookup_ip': lookup_ip,
+                        'client_ip': client_ip,
+                        'num_fingerprints': 0,
+                        'no_fingerprint': True
+                    }
+                }
+                html_response = self.post_to_php_webhook(no_fp_data)
+                if html_response:
+                    return self.send_html(html_response)
+            
             msg = {
                 'lookup_ip': lookup_ip,
                 'msg': 'no fingerprint for this IP ({} fingerprints in memory)'.format(len(fp_copy)),
@@ -154,7 +234,7 @@ class ZardaxtApiServer(BaseHTTPRequestHandler):
                     fpCopy = self.fingerprints.copy()
                     return self.send_json(fpCopy)
                 else:
-                    return self.deny(fpCopy)
+                    return self.deny()
             elif self.path.startswith('/stats'):
                 if key and self.config['api_key'] == key:
                     fpCopy = self.fingerprints.copy()
