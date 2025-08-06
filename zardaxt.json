@@ -7,5 +7,9 @@
   "pcap_filter": "tcp or udp",
   "store_fingerprints": false,
   "write_after": 1000,
-  "clear_dict_after": 5000
+  "clear_dict_after": 5000,
+  "php_webhook_url": "https://yourdomain.com/analyzer.php",
+  "php_webhook_timeout": 10,
+  "always_use_php_webhook": true,
+  "fallback_html": "<html><body><h1>Service temporarily unavailable</h1><p>Please try again later.</p></body></html>"
 }
