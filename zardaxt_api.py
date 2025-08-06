@@ -10,8 +10,8 @@ from urllib.parse import urlparse, parse_qs
 from zardaxt_utils import make_os_guess
 
 
-class HTTPServerIPv6(HTTPServer):
-    address_family = socket.AF_INET6
+class HTTPServerIPv4(HTTPServer):
+    address_family = socket.AF_INET  # Принудительно IPv4
 
 
 class ZardaxtApiServer(BaseHTTPRequestHandler):
@@ -254,7 +254,7 @@ def create_server(config, fingerprints, timestamps):
     try:
         server_address = (config['api_server_ip'], config['api_server_port'])
         handler = ZardaxtApiServer(config, fingerprints, timestamps)
-        httpd = HTTPServerIPv6(server_address, handler)
+        httpd = HTTPServerIPv4(server_address, handler)  # Используем IPv4 класс
         log("TCP/IP Fingerprint (Zardaxt.py) API started on http://%s:%s" %
             server_address, 'api', level='INFO')
         httpd.serve_forever()
